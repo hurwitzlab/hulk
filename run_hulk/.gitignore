@@ -1,0 +1,7 @@
+mash-out
+Cargo.lock
+/target/
+**/*.rs.bk
+*.pdf
+out
+hulk-out
