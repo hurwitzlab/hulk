@@ -1,0 +1,30 @@
+BootStrap: docker
+From: ubuntu:latest
+
+%environment
+    PATH=/app/hulk/scripts:$PATH
+
+%runscript
+    exec hulk "$@"
+
+%post
+    apt-get update
+    apt-get install -y locales wget 
+    locale-gen en_US.UTF-8
+
+    wget https://github.com/will-rowe/hulk/releases/download/0.1.0/hulk-linux.gz
+    gunzip hulk-linux.gz
+    mv hulk-linux /usr/local/bin/hulk
+    chmod +x /usr/local/bin/hulk
+
+    #git clone https://github.com/hurwitzlab/mash.git
+    #cd /app/mash/run_mash
+    #cargo build --release
+    #mv target/release/run_mash /usr/local/bin
+
+    #
+    # Mount points for TACC directories
+    #
+    mkdir /home1
+    mkdir /scratch
+    mkdir /work

@@ -1,8 +1,10 @@
 extern crate clap;
 extern crate csv;
+extern crate regex;
 extern crate walkdir;
 
 use clap::{App, Arg};
+use regex::Regex;
 use std::collections::HashMap;
 use std::error::Error;
 use std::process::{Command, Stdio};
@@ -256,11 +258,13 @@ fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<Vec<String>> {
 
     run_jobs(&jobs, "Sketching files", 8)?;
 
+    let re = Regex::new(r"\.sketch$").unwrap();
     let mut sketches: Vec<String> = WalkDir::new(sketch_dir)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| !e.file_type().is_dir())
         .map(|e| e.path().display().to_string())
+        .filter(|name| re.is_match(name))
         .collect();
 
     sketches.sort();

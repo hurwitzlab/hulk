@@ -6,4 +6,5 @@ authors = ["Ken Youens-Clark <kyclark@gmail.com>"]
 [dependencies]
 clap = "~2.32"
 walkdir = "2"
+regex = "1.0.5"
 csv = "1"
