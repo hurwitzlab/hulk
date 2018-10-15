@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::process::{Command, Stdio};
 use std::{
-    env, fs::{self, DirBuilder, File}, io::Write, path::{Path, PathBuf},
+    env, fs::{self, DirBuilder, File}, io::{Read, Write}, path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
 
@@ -31,13 +31,20 @@ pub struct Config {
     out_dir: PathBuf,
     query: Vec<String>,
     reads_are_fasta: bool,
+    create_weighted_matrix: bool,
 }
 
 // --------------------------------------------------
 pub fn run(config: Config) -> MyResult<()> {
     println!("config {:?}", config);
 
-    let files = find_files(&config.query)?;
+    let files = find_files(&config.query, None)?;
+
+    if files.len() == 0 {
+        let msg = format!("No input files from query \"{:?}\"", &config.query);
+        return Err(From::from(msg));
+    }
+
     println!(
         "Will process {} file{}",
         files.len(),
@@ -49,11 +56,11 @@ pub fn run(config: Config) -> MyResult<()> {
         DirBuilder::new().recursive(true).create(&out_dir)?;
     }
 
-    let sketches = sketch_files(&config, &files)?;
-    println!("Sketches = {:?}", sketches);
+    let sketch_dir = sketch_files(&config, &files)?;
+    println!("Sketch dir = {:?}", sketch_dir);
 
-    //let fig_dir = pairwise_compare(&config, &sketches)?;
-    //println!("Done, see figures in {}", fig_dir);
+    let smash_file = smash_sketches(&config, &sketch_dir)?;
+    println!("Done, see smash out \"{}\"", smash_file.to_string_lossy());
 
     Ok(())
 }
@@ -133,6 +140,12 @@ pub fn get_args() -> MyResult<Config> {
                 .long("reads_are_fasta")
                 .help("Input reads are in FASTA format"),
         )
+        .arg(
+            Arg::with_name("create_weighted_matrix")
+                .short("w")
+                .long("create_weighted_matrix")
+                .help("Create a pairwise weighted Jaccard Similarity matrix"),
+        )
         .get_matches();
 
     let out_dir = match matches.value_of("out_dir") {
@@ -175,13 +188,14 @@ pub fn get_args() -> MyResult<Config> {
         out_dir: out_dir,
         query: matches.values_of_lossy("query").unwrap(),
         reads_are_fasta: matches.is_present("reads_are_fasta"),
+        create_weighted_matrix: matches.is_present("create_weighted_matrix"),
     };
 
     Ok(config)
 }
 
 // --------------------------------------------------
-fn find_files(paths: &Vec<String>) -> Result<Vec<String>, Box<Error>> {
+fn find_files(paths: &Vec<String>, re: Option<&Regex>) -> MyResult<Vec<String>> {
     let mut files = vec![];
     for path in paths {
         let meta = fs::metadata(path)?;
@@ -191,22 +205,27 @@ fn find_files(paths: &Vec<String>) -> Result<Vec<String>, Box<Error>> {
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
                 let meta = entry.metadata()?;
+                let name = entry.path().display().to_string();
                 if meta.is_file() {
-                    files.push(entry.path().display().to_string());
+                    let ok = match re {
+                        Some(r) => r.is_match(&name),
+                        _ => true,
+                    };
+
+                    if ok {
+                        files.push(name);
+                    }
                 }
             }
         };
     }
 
-    if files.len() == 0 {
-        return Err(From::from("No input files"));
-    }
-
+    files.sort();
     Ok(files)
 }
 
 // --------------------------------------------------
-fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<Vec<String>> {
+fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<PathBuf> {
     let sketch_dir = config.out_dir.join(PathBuf::from("sketches"));
     if !sketch_dir.is_dir() {
         DirBuilder::new().recursive(true).create(&sketch_dir)?;
@@ -244,7 +263,7 @@ fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<Vec<String>> {
     for file in files.iter() {
         let basename = basename(&file, &aliases);
         let out_file = sketch_dir.join(basename);
-        let hulk_file = format!("{}", out_file.display());
+        let hulk_file = format!("{}.sketch", out_file.display());
 
         if !Path::new(&hulk_file).exists() {
             jobs.push(format!(
@@ -256,10 +275,15 @@ fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<Vec<String>> {
         }
     }
 
-    run_jobs(&jobs, "Sketching files", 8)?;
+    if jobs.len() > 0 {
+        println!("jobs =\n{:?}", jobs);
+        run_jobs(&jobs, "Sketching files", 8)?;
+    } else {
+        println!("No sketch jobs to run, skipping this step");
+    }
 
     let re = Regex::new(r"\.sketch$").unwrap();
-    let mut sketches: Vec<String> = WalkDir::new(sketch_dir)
+    let mut sketches: Vec<String> = WalkDir::new(&sketch_dir)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| !e.file_type().is_dir())
@@ -273,7 +297,7 @@ fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<Vec<String>> {
         return Err(From::from("Failed to create all sketches"));
     }
 
-    Ok(sketches)
+    Ok(sketch_dir)
 }
 
 // --------------------------------------------------
@@ -361,6 +385,83 @@ fn get_aliases(alias_file: &Option<String>) -> Result<Option<Record>, Box<Error>
             }
         }
     }
+}
+
+// --------------------------------------------------
+fn smash_sketches(config: &Config, sketch_dir: &PathBuf) -> MyResult<PathBuf> {
+    let matrix_arg = format!(
+        "--{}jsMatrix",
+        if config.create_weighted_matrix {
+            "w"
+        } else {
+            ""
+        }
+    );
+
+    let distance_prefix = "dist";
+    let smash_out = config.out_dir.join(&distance_prefix);
+
+    let hulk_out = Command::new("hulk")
+        .arg("smash")
+        .arg(matrix_arg)
+        .arg("-d")
+        .arg(format!("{}/", sketch_dir.to_string_lossy()))
+        .arg("--outFile")
+        .arg(&smash_out)
+        .output()?;
+
+    if !hulk_out.status.success() {
+        return Err(From::from(format!(
+            "Error ({}): {}",
+            hulk_out.status,
+            String::from_utf8_lossy(&hulk_out.stderr)
+        )));
+    }
+
+    let distance_file_name = format!(
+        "{}.{}js-matrix.csv",
+        distance_prefix,
+        if config.create_weighted_matrix {
+            "w"
+        } else {
+            ""
+        }
+    );
+
+    let distance_file = config.out_dir.join(distance_file_name);
+    if !distance_file.is_file() {
+        let msg = format!(
+            "Failed to create distance file \"{}\"",
+            distance_file.to_string_lossy()
+        );
+        return Err(From::from(msg));
+    }
+
+    let mut f = File::open(&distance_file)?;
+    let mut contents = String::new();
+    f.read_to_string(&mut contents)?;
+    let lines: Vec<&str> = contents.split("\n").collect();
+    let file_names: Vec<&str> = lines[0].split(",").map(|x| basename(&x, &None)).collect();
+
+    let dist = config.out_dir.join("distance.csv");
+    let mut out = File::create(&dist)?;
+
+    for (i, line) in lines.iter().enumerate() {
+        if line == &"" {
+            break;
+        }
+
+        if i == 0 {
+            write!(out, ",{}\n", file_names.join(","))?;
+        } else {
+            let n = line.split(",")
+                .map(|x| x.parse::<f64>().and_then(|f| f / 100.0))
+                .collect();
+            write!(out, "{},{}\n", &file_names[i - 1], n.join(","))?;
+        }
+    }
+
+    Ok(dist)
 }
 
 // --------------------------------------------------
