@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::process::{Command, Stdio};
 use std::{
-    env, fs::{self, DirBuilder, File}, io::{Read, Write}, path::{Path, PathBuf},
+    env, ffi::OsStr, fs::{self, DirBuilder, File}, io::{Read, Write},
+    path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
 
@@ -195,7 +196,10 @@ pub fn get_args() -> MyResult<Config> {
 }
 
 // --------------------------------------------------
-fn find_files(paths: &Vec<String>, re: Option<&Regex>) -> MyResult<Vec<String>> {
+fn find_files(
+    paths: &Vec<String>,
+    re: Option<&Regex>,
+) -> MyResult<Vec<String>> {
     let mut files = vec![];
     for path in paths {
         let meta = fs::metadata(path)?;
@@ -301,7 +305,11 @@ fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<PathBuf> {
 }
 
 // --------------------------------------------------
-fn run_jobs(jobs: &Vec<String>, msg: &str, num_concurrent: u32) -> MyResult<()> {
+fn run_jobs(
+    jobs: &Vec<String>,
+    msg: &str,
+    num_concurrent: u32,
+) -> MyResult<()> {
     let num_jobs = jobs.len();
 
     if num_jobs > 0 {
@@ -339,14 +347,20 @@ fn run_jobs(jobs: &Vec<String>, msg: &str, num_concurrent: u32) -> MyResult<()> 
 }
 
 // --------------------------------------------------
-fn get_aliases(alias_file: &Option<String>) -> Result<Option<Record>, Box<Error>> {
+fn get_aliases(
+    alias_file: &Option<String>,
+) -> Result<Option<Record>, Box<Error>> {
     match alias_file {
         None => Ok(None),
         Some(file) => {
             let alias_fh = match File::open(file) {
                 Ok(file) => file,
                 Err(e) => {
-                    let msg = format!("Failed to open \"{}\": {}", file, e.to_string());
+                    let msg = format!(
+                        "Failed to open \"{}\": {}",
+                        file,
+                        e.to_string()
+                    );
                     return Err(From::from(msg));
                 }
             };
@@ -441,23 +455,28 @@ fn smash_sketches(config: &Config, sketch_dir: &PathBuf) -> MyResult<PathBuf> {
     let mut contents = String::new();
     f.read_to_string(&mut contents)?;
     let lines: Vec<&str> = contents.split("\n").collect();
-    let file_names: Vec<&str> = lines[0].split(",").map(|x| basename(&x, &None)).collect();
+    let file_names: Vec<&str> = lines[0]
+        .split(",")
+        .map(|x| Path::new(basename(&x, &None)))
+        .map(|p| p.file_stem().and_then(OsStr::to_str).unwrap())
+        .collect();
 
-    let dist = config.out_dir.join("distance.csv");
+    let dist = config.out_dir.join("distance.tab");
     let mut out = File::create(&dist)?;
 
     for (i, line) in lines.iter().enumerate() {
         if line == &"" {
             break;
-        }
-
-        if i == 0 {
-            write!(out, ",{}\n", file_names.join(","))?;
+        } else if i == 0 {
+            write!(out, "\t{}\n", file_names.join("\t"))?;
         } else {
-            let n = line.split(",")
-                .map(|x| x.parse::<f64>().and_then(|f| f / 100.0))
+            let n: Vec<String> = line.split(",")
+                .map(|s| s.parse::<f64>())
+                .filter_map(Result::ok)
+                .map(|n| format!("{:.04}", (n / 100.0).to_string()))
                 .collect();
-            write!(out, "{},{}\n", &file_names[i - 1], n.join(","))?;
+
+            write!(out, "{}\t{}\n", &file_names[i - 1], n.join("\t"))?;
         }
     }
 
