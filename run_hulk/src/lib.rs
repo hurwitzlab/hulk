@@ -24,6 +24,7 @@ type MyResult<T> = Result<T, Box<Error>>;
 #[derive(Debug)]
 pub struct Config {
     alias_file: Option<String>,
+    bin_dir: Option<String>,
     kmer_size: Option<u32>,
     min_kmer_count: Option<u32>,
     interval: Option<u32>,
@@ -60,8 +61,8 @@ pub fn run(config: Config) -> MyResult<()> {
     let sketch_dir = sketch_files(&config, &files)?;
     println!("Sketch dir = {:?}", sketch_dir);
 
-    let smash_file = smash_sketches(&config, &sketch_dir)?;
-    println!("Done, see smash out \"{}\"", smash_file.to_string_lossy());
+    let fig_dir = smash_sketches(&config, &sketch_dir)?;
+    println!("Done, see output in \"{}\"", fig_dir.to_string_lossy());
 
     Ok(())
 }
@@ -147,6 +148,13 @@ pub fn get_args() -> MyResult<Config> {
                 .long("create_weighted_matrix")
                 .help("Create a pairwise weighted Jaccard Similarity matrix"),
         )
+        .arg(
+            Arg::with_name("bin_dir")
+                .short("b")
+                .long("bin_dir")
+                .value_name("DIR")
+                .help("Location of binaries"),
+        )
         .get_matches();
 
     let out_dir = match matches.value_of("out_dir") {
@@ -175,12 +183,18 @@ pub fn get_args() -> MyResult<Config> {
         .value_of("min_kmer_count")
         .and_then(|x| x.trim().parse::<u32>().ok());
 
+    let bin_dir = match matches.value_of("bin_dir") {
+        Some(x) => Some(x.to_string()),
+        _ => None,
+    };
+
     let sketch_size = matches
         .value_of("sketch_size")
         .and_then(|x| x.trim().parse::<u32>().ok());
 
     let config = Config {
         alias_file: alias,
+        bin_dir: bin_dir,
         kmer_size: kmer_size,
         min_kmer_count: min_kmer_count,
         interval: interval,
@@ -271,16 +285,15 @@ fn sketch_files(config: &Config, files: &Vec<String>) -> MyResult<PathBuf> {
 
         if !Path::new(&hulk_file).exists() {
             jobs.push(format!(
-                "cat {} | hulk sketch {} -o {}",
-                file,
+                "hulk sketch {} -o {} -f {}",
                 args.join(" "),
                 out_file.display(),
+                file,
             ));
         }
     }
 
     if jobs.len() > 0 {
-        println!("jobs =\n{:?}", jobs);
         run_jobs(&jobs, "Sketching files", 8)?;
     } else {
         println!("No sketch jobs to run, skipping this step");
@@ -412,8 +425,13 @@ fn smash_sketches(config: &Config, sketch_dir: &PathBuf) -> MyResult<PathBuf> {
         }
     );
 
-    let distance_prefix = "dist";
-    let smash_out = config.out_dir.join(&distance_prefix);
+    let fig_dir = config.out_dir.join("figures");
+    if !fig_dir.is_dir() {
+        DirBuilder::new().recursive(true).create(&fig_dir)?;
+    }
+
+    let out_prefix = "hulk";
+    let smash_out = fig_dir.join(&out_prefix);
 
     let hulk_out = Command::new("hulk")
         .arg("smash")
@@ -432,9 +450,9 @@ fn smash_sketches(config: &Config, sketch_dir: &PathBuf) -> MyResult<PathBuf> {
         )));
     }
 
-    let distance_file_name = format!(
+    let out_file_name = format!(
         "{}.{}js-matrix.csv",
-        distance_prefix,
+        out_prefix,
         if config.create_weighted_matrix {
             "w"
         } else {
@@ -442,16 +460,16 @@ fn smash_sketches(config: &Config, sketch_dir: &PathBuf) -> MyResult<PathBuf> {
         }
     );
 
-    let distance_file = config.out_dir.join(distance_file_name);
-    if !distance_file.is_file() {
+    let out_file = fig_dir.join(out_file_name);
+    if !out_file.is_file() {
         let msg = format!(
-            "Failed to create distance file \"{}\"",
-            distance_file.to_string_lossy()
+            "Failed to create HULK output \"{}\"",
+            out_file.to_string_lossy()
         );
         return Err(From::from(msg));
     }
 
-    let mut f = File::open(&distance_file)?;
+    let mut f = File::open(&out_file)?;
     let mut contents = String::new();
     f.read_to_string(&mut contents)?;
     let lines: Vec<&str> = contents.split("\n").collect();
@@ -461,7 +479,7 @@ fn smash_sketches(config: &Config, sketch_dir: &PathBuf) -> MyResult<PathBuf> {
         .map(|p| p.file_stem().and_then(OsStr::to_str).unwrap())
         .collect();
 
-    let dist = config.out_dir.join("distance.tab");
+    let dist = fig_dir.join("distance.tab");
     let mut out = File::create(&dist)?;
 
     for (i, line) in lines.iter().enumerate() {
@@ -473,14 +491,37 @@ fn smash_sketches(config: &Config, sketch_dir: &PathBuf) -> MyResult<PathBuf> {
             let n: Vec<String> = line.split(",")
                 .map(|s| s.parse::<f64>())
                 .filter_map(Result::ok)
-                .map(|n| format!("{:.04}", (n / 100.0).to_string()))
+                .map(|n| format!("{:.04}", (1. - (n / 100.0)).to_string()))
                 .collect();
 
             write!(out, "{}\t{}\n", &file_names[i - 1], n.join("\t"))?;
         }
     }
 
-    Ok(dist)
+    let make_figures = "make_figures.r";
+    let make_figures_path = match &config.bin_dir {
+        Some(d) => Path::new(&d).join(make_figures),
+        _ => PathBuf::from(make_figures),
+    };
+
+    println!("Making figures");
+    let mk_figs = Command::new(&make_figures_path)
+        .arg("-o")
+        .arg(&fig_dir)
+        .arg("-m")
+        .arg(&dist)
+        .output();
+
+    if let Err(e) = mk_figs {
+        let msg = format!(
+            "Failed to run \"{}\": {}",
+            make_figures_path.to_string_lossy(),
+            e.to_string()
+        );
+        return Err(From::from(msg));
+    };
+
+    Ok(fig_dir)
 }
 
 // --------------------------------------------------
